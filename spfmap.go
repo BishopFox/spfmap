@@ -47,9 +47,8 @@ func LookupDMARC(domain string) (string, error) {
 	return "", nil
 }
 
-func ingestDomains(inFileName string, ingestQueue chan<- string, numChan chan<- int) {
+func ingestDomains(inFileName string, ingestQueue chan<- string) {
 	file, err := os.Open(inFileName)
-	numDomains := 0
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -64,15 +63,13 @@ func ingestDomains(inFileName string, ingestQueue chan<- string, numChan chan<- 
 
 	for scanner.Scan() {
 		ingestQueue <- scanner.Text()
-		numDomains += 1
 		fmt.Println("File Reader: Added " + scanner.Text())
 	}
 	close(ingestQueue)
-	numChan <- numDomains
 }
 
 // Does the heavy lifting
-func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanResult, 
+func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanResult, doneQueue chan<- bool,
 				  scanSpf bool, scanDmarc bool) {
 	fmt.Println("Ingest Worker ", id, " initialized")
 	for domain := range ingestQueue {
@@ -83,17 +80,23 @@ func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanRes
 
 		resultsQueue <- result
 	}
+
+	doneQueue <- true
 }
 
-func resultsWorker(resultsQueue <-chan ScanResult, dbName string, numDomains <-chan int) {
+func closeResultsQueue(doneQueue <-chan bool, resultsQueue chan ScanResult, numWorkers int) {
+	for i := 0; i < numWorkers; i++ {
+		<-doneQueue
+	}
+	close(resultsQueue)
+}
+
+func resultsWorker(resultsQueue <-chan ScanResult, dbName string) {
 	c, _ := sqlite3.Open(dbName)
 
 	fmt.Println("Results Worker initialized")
-	num, _ := <- numDomains
-	var result ScanResult
 
-	for i := 0; i < num; i++ {
-		result, _ = <- resultsQueue 
+	for result := range resultsQueue {
 		fmt.Println("Results worker processing ", result.domain_name)
 		all_r, _ := regexp.Compile(".all")
 		all_s := all_r.FindString(result.spf_string)
@@ -135,7 +138,7 @@ func main() {
 
 	ingestQueue := make(chan string, 100)
 	resultsQueue := make(chan ScanResult, 100)
-	numDomains := make(chan int)
+	doneQueue := make(chan bool, *ingestWorkerNumber)
 
 	fmt.Println("Made Channels")
 
@@ -154,11 +157,11 @@ func main() {
 
 	// Spin out a number of ingest workers based on user input
 	for w := 1; w <= *ingestWorkerNumber; w++ {
-		go ingestWorker(w, ingestQueue, resultsQueue, runSpfScan, runDmarcScan)
+		go ingestWorker(w, ingestQueue, resultsQueue, doneQueue, runSpfScan, runDmarcScan)
 	}
 
 	if *inFileName != "" {
-		go ingestDomains(*inFileName, ingestQueue, numDomains)
+		go ingestDomains(*inFileName, ingestQueue)
 	} else if *targetName != "" {
 		ingestQueue <- *targetName
 		close(ingestQueue)
@@ -167,6 +170,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	resultsWorker(resultsQueue, *dbName, numDomains)
+	go closeResultsQueue(doneQueue, resultsQueue, *ingestWorkerNumber)
+
+	resultsWorker(resultsQueue, *dbName)
 
 }
