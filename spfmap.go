@@ -7,6 +7,7 @@ import "regexp"
 import "bufio"
 import "code.google.com/p/go-sqlite/go1/sqlite3"
 import "fmt"
+import "sync"
 
 type ScanResult struct {
 	domain_name string
@@ -69,7 +70,7 @@ func ingestDomains(inFileName string, ingestQueue chan<- string) {
 }
 
 // Does the heavy lifting
-func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanResult, doneQueue chan<- bool,
+func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanResult, wg *sync.WaitGroup,
 				  scanSpf bool, scanDmarc bool) {
 	fmt.Println("Ingest Worker ", id, " initialized")
 	for domain := range ingestQueue {
@@ -80,14 +81,13 @@ func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanRes
 
 		resultsQueue <- result
 	}
-
-	doneQueue <- true
+	fmt.Println("Ingest Worker", id, "finished")
+	wg.Done()
 }
 
-func closeResultsQueue(doneQueue <-chan bool, resultsQueue chan ScanResult, numWorkers int) {
-	for i := 0; i < numWorkers; i++ {
-		<-doneQueue
-	}
+func closeResultsQueue(wg *sync.WaitGroup, resultsQueue chan ScanResult, numWorkers int) {
+	wg.Wait()
+	fmt.Println("Closing results queue")
 	close(resultsQueue)
 }
 
@@ -138,7 +138,8 @@ func main() {
 
 	ingestQueue := make(chan string, 100)
 	resultsQueue := make(chan ScanResult, 100)
-	doneQueue := make(chan bool, *ingestWorkerNumber)
+
+	var wg sync.WaitGroup
 
 	fmt.Println("Made Channels")
 
@@ -156,8 +157,9 @@ func main() {
 	fmt.Println("Scanning SPF: ", runSpfScan)
 
 	// Spin out a number of ingest workers based on user input
+	wg.Add(*ingestWorkerNumber)
 	for w := 1; w <= *ingestWorkerNumber; w++ {
-		go ingestWorker(w, ingestQueue, resultsQueue, doneQueue, runSpfScan, runDmarcScan)
+		go ingestWorker(w, ingestQueue, resultsQueue, &wg, runSpfScan, runDmarcScan)
 	}
 
 	if *inFileName != "" {
@@ -170,7 +172,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	go closeResultsQueue(doneQueue, resultsQueue, *ingestWorkerNumber)
+	go closeResultsQueue(&wg, resultsQueue, *ingestWorkerNumber)
 
 	resultsWorker(resultsQueue, *dbName)
 
