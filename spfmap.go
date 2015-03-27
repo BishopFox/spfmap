@@ -5,7 +5,7 @@ import "net"
 import "flag"
 import "regexp"
 import "bufio"
-import "code.google.com/p/go-sqlite/go1/sqlite3"
+import "github.com/mxk/go-sqlite/sqlite3"
 import "fmt"
 import "sync"
 
