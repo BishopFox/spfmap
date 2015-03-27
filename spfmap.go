@@ -5,10 +5,14 @@ import "net"
 import "flag"
 import "regexp"
 import "bufio"
+import "strconv"
 import "github.com/mxk/go-sqlite/sqlite3"
-import "fmt"
 import "sync"
 import tm "github.com/buger/goterm"
+import "github.com/alexcesaro/log/stdlog"
+import "github.com/alexcesaro/log"
+
+var logger log.Logger
 
 type ScanResult struct {
 	domain_name string
@@ -59,25 +63,25 @@ func createReport(dbName string) {
 	tm.Clear()
 
 	tm.MoveCursor(1, 1)
-	tm.Println("SPF and DMARC Report")
+	tm.Println(tm.Bold("SPF and DMARC Report"))
 	tm.Println("====================")
 	tm.Println("Number of records total:", numRecords)
 	tm.Println("")
 	tm.Println("Domains with SPF records:", numSpfRecords, "(", pctSpf, "%)")
 	tm.Println("Domains with DMARC records:", numDmarcRecords, "(", pctDmarc, "%)")
 	tm.Println("")
-	tm.Println("SPF Statistics")
+	tm.Println(tm.Bold("SPF Statistics"))
 	tm.Println("--------------")
 	tm.Println("Domains with ~all or -all:", numSpfAll, "(", pctSpfAll, "%)")
 	tm.Println("Domains with -all:", numSpfMinusAll, "(", pctSpfMinusAll, "%)")
 	tm.Println("")
-	tm.Println("DMARC Statistics")
+	tm.Println(tm.Bold("DMARC Statistics"))
 	tm.Println("----------------")	
 	tm.Println("Domains with Reject or Quarantine Policy:", numDmarcRejectQuarantine, "(", pctDmarcRejectQuarantine, "%)")
 	tm.Println("")
 	tm.Println("")
 	tm.Println("---------------------------------------------------")
-	tm.Println("Domains with non-spoofable configuration:", numNotSpoofable, "(", pctNotSpoofable, "%)")
+	tm.Println(tm.Bold("Domains with non-spoofable configuration:"), tm.Color(strconv.Itoa(int(numNotSpoofable)), tm.RED), "(", pctNotSpoofable, "%)")
 	tm.Println("---------------------------------------------------")
 
 	tm.Flush()
@@ -120,7 +124,7 @@ func LookupDMARC(domain string) (string, error) {
 func ingestDomains(inFileName string, ingestQueue chan<- string) {
 	file, err := os.Open(inFileName)
 	if err != nil {
-		fmt.Println(err)
+		logger.Debug(err)
 		os.Exit(1)
 	}
 
@@ -129,11 +133,11 @@ func ingestDomains(inFileName string, ingestQueue chan<- string) {
 	reader := bufio.NewReader(file)
 	scanner := bufio.NewScanner(reader)
 
-	fmt.Println("File Reader: Initialized")
+	logger.Debug("File Reader: Initialized")
 
 	for scanner.Scan() {
 		ingestQueue <- scanner.Text()
-		fmt.Println("File Reader: Added " + scanner.Text())
+		logger.Debug("File Reader: Added " + scanner.Text())
 	}
 	close(ingestQueue)
 }
@@ -141,32 +145,32 @@ func ingestDomains(inFileName string, ingestQueue chan<- string) {
 // Does the heavy lifting
 func ingestWorker(id int, ingestQueue <-chan string, resultsQueue chan<- ScanResult, wg *sync.WaitGroup,
 				  scanSpf bool, scanDmarc bool) {
-	fmt.Println("Ingest Worker ", id, " initialized")
+	logger.Debug("Ingest Worker", id, "initialized")
 	for domain := range ingestQueue {
-		fmt.Println("Ingest Worker ", id, "processing ", domain)
+		logger.Debug("Ingest Worker", id, "processing ", domain)
 		result := ScanResult{domain_name: domain}
 		result.spf_string, _ = LookupSPF(domain)
 		result.dmarc_string, _ = LookupDMARC(domain)
 
 		resultsQueue <- result
 	}
-	fmt.Println("Ingest Worker", id, "finished")
+	logger.Debug("Ingest Worker", id, "finished")
 	wg.Done()
 }
 
 func closeResultsQueue(wg *sync.WaitGroup, resultsQueue chan ScanResult, numWorkers int) {
 	wg.Wait()
-	fmt.Println("Closing results queue")
+	logger.Debug("Closing results queue")
 	close(resultsQueue)
 }
 
 func resultsWorker(resultsQueue <-chan ScanResult, dbName string) {
 	c, _ := sqlite3.Open(dbName)
 
-	fmt.Println("Results Worker initialized")
+	logger.Debug("Results Worker initialized")
 
 	for result := range resultsQueue {
-		fmt.Println("Results worker processing ", result.domain_name)
+		logger.Debug("Results worker processing", result.domain_name)
 		all_r, _ := regexp.Compile(".all")
 		all_s := all_r.FindString(result.spf_string)
 
@@ -181,7 +185,7 @@ func resultsWorker(resultsQueue <-chan ScanResult, dbName string) {
 								}
 		err := c.Exec("INSERT INTO results(domain_name, spf_string, dmarc_string, spf_all, dmarc_p) VALUES($domain, $spf_string, $dmarc_string, $spf_all, $dmarc_p);", args)
 		if err != nil {
-			fmt.Println(err)
+			logger.Debug(err)
 		}
 		
 	}
@@ -204,6 +208,10 @@ func main() {
 
 	flag.Parse()
 
+	logger = stdlog.GetFromFlags()
+
+
+
 	if *scanAll || *spfScan || *dmarcScan {
 
 		// Set up ingest and results queues
@@ -213,7 +221,7 @@ func main() {
 
 		var wg sync.WaitGroup
 
-		fmt.Println("Made Channels")
+		logger.Debug("Made Channels")
 
 		// Logic to ensure we scan the right stuff
 		runSpfScan := false
@@ -225,8 +233,8 @@ func main() {
 			runDmarcScan = true
 		}
 
-		fmt.Println("Scanning DMARC: ", runDmarcScan)
-		fmt.Println("Scanning SPF: ", runSpfScan)
+		logger.Debug("Scanning DMARC: ", runDmarcScan)
+		logger.Debug("Scanning SPF: ", runSpfScan)
 
 		// Spin out a number of ingest workers based on user input
 		wg.Add(*ingestWorkerNumber)
