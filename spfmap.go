@@ -8,12 +8,81 @@ import "bufio"
 import "github.com/mxk/go-sqlite/sqlite3"
 import "fmt"
 import "sync"
+import tm "github.com/buger/goterm"
 
 type ScanResult struct {
 	domain_name string
 	spf_string string
 	dmarc_string string
 }
+
+func createReport(dbName string) {
+	c, _ := sqlite3.Open(dbName)
+
+	q_numRecords := "SELECT count(*) FROM results;"
+	q_numSpfRecords := "SELECT count(domain_name) FROM results WHERE spf_string NOT LIKE \"\""
+	q_numDmarcRecords := "SELECT count(domain_name) FROM results WHERE dmarc_string NOT LIKE \"\""
+	q_numSpfAll := "SELECT count(domain_name) FROM results WHERE (spf_all LIKE \"%all\")"
+	q_numSpfMinusAll := "SELECT count(domain_name) FROM results WHERE (spf_all LIKE \"-all\")"
+	q_numDmarcRejectQuarantine := "SELECT count(domain_name) FROM results WHERE (dmarc_p LIKE \"p=reject;\" OR dmarc_p LIKE \"p=quarantine;\")"
+	q_numNotSpoofable := "SELECT count(domain_name) FROM results WHERE spf_all NOT LIKE \"\" AND (dmarc_p LIKE \"p=reject;\" OR dmarc_p LIKE \"p=quarantine;\")"
+
+	s1, _ := c.Query(q_numRecords)
+	var numRecords int64
+	s1.Scan(&numRecords)
+	s2, _ := c.Query(q_numSpfRecords)
+	var numSpfRecords int64
+	s2.Scan(&numSpfRecords)
+	s3, _ := c.Query(q_numDmarcRecords)
+	var numDmarcRecords int64
+	s3.Scan(&numDmarcRecords)
+	s4, _ := c.Query(q_numSpfAll)
+	var numSpfAll int64
+	s4.Scan(&numSpfAll)
+	s5, _ := c.Query(q_numSpfMinusAll)
+	var numSpfMinusAll int64
+	s5.Scan(&numSpfMinusAll)
+	s6, _ := c.Query(q_numDmarcRejectQuarantine)
+	var numDmarcRejectQuarantine int64
+	s6.Scan(&numDmarcRejectQuarantine)
+	s7, _ := c.Query(q_numNotSpoofable)
+	var numNotSpoofable int64
+	s7.Scan(&numNotSpoofable)
+
+	pctSpf := (float64(numSpfRecords)/float64(numRecords))*100
+	pctDmarc := (float64(numDmarcRecords)/float64(numRecords))*100
+	pctSpfAll := (float64(numSpfAll)/float64(numRecords))*100
+	pctSpfMinusAll := (float64(numSpfMinusAll)/float64(numRecords))*100
+	pctDmarcRejectQuarantine := (float64(numDmarcRejectQuarantine)/float64(numRecords))*100
+	pctNotSpoofable := (float64(numNotSpoofable)/float64(numRecords))*100
+
+	tm.Clear()
+
+	tm.MoveCursor(1, 1)
+	tm.Println("SPF and DMARC Report")
+	tm.Println("====================")
+	tm.Println("Number of records total:", numRecords)
+	tm.Println("")
+	tm.Println("Domains with SPF records:", numSpfRecords, "(", pctSpf, "%)")
+	tm.Println("Domains with DMARC records:", numDmarcRecords, "(", pctDmarc, "%)")
+	tm.Println("")
+	tm.Println("SPF Statistics")
+	tm.Println("--------------")
+	tm.Println("Domains with ~all or -all:", numSpfAll, "(", pctSpfAll, "%)")
+	tm.Println("Domains with -all:", numSpfMinusAll, "(", pctSpfMinusAll, "%)")
+	tm.Println("")
+	tm.Println("DMARC Statistics")
+	tm.Println("----------------")	
+	tm.Println("Domains with Reject or Quarantine Policy:", numDmarcRejectQuarantine, "(", pctDmarcRejectQuarantine, "%)")
+	tm.Println("")
+	tm.Println("")
+	tm.Println("---------------------------------------------------")
+	tm.Println("Domains with non-spoofable configuration:", numNotSpoofable, "(", pctNotSpoofable, "%)")
+	tm.Println("---------------------------------------------------")
+
+	tm.Flush()
+}
+
 
 func LookupSPF(domain string) (string, error) {
 	txtRecords, err := net.LookupTXT(domain)
@@ -125,6 +194,8 @@ func main() {
 	dmarcScan := flag.Bool("dmarc", false, "Scan targets for DMARC")
 	scanAll := flag.Bool("all", true, "Scan targets for both SPF and DMARC")
 
+	genReport := flag.Bool("report", true, "Generate a report for the database")
+
 	inFileName := flag.String("infile", "", "File with target lists (one domain per line)")
 	targetName := flag.String("target", "", "Domain to target")
 	dbName := flag.String("db", "spfmap.db", "Name of the SQLite3 database to target")
@@ -133,47 +204,52 @@ func main() {
 
 	flag.Parse()
 
+	if *scanAll || *spfScan || *dmarcScan {
 
-	// Set up ingest and results queues
+		// Set up ingest and results queues
 
-	ingestQueue := make(chan string, 100)
-	resultsQueue := make(chan ScanResult, 100)
+		ingestQueue := make(chan string, 100)
+		resultsQueue := make(chan ScanResult, 100)
 
-	var wg sync.WaitGroup
+		var wg sync.WaitGroup
 
-	fmt.Println("Made Channels")
+		fmt.Println("Made Channels")
 
-	// Logic to ensure we scan the right stuff
-	runSpfScan := false
-	runDmarcScan := false
-	if *spfScan == true || *scanAll == true {
-		runSpfScan = true
+		// Logic to ensure we scan the right stuff
+		runSpfScan := false
+		runDmarcScan := false
+		if *spfScan == true || *scanAll == true {
+			runSpfScan = true
+		}
+		if *dmarcScan == true || *scanAll == true {
+			runDmarcScan = true
+		}
+
+		fmt.Println("Scanning DMARC: ", runDmarcScan)
+		fmt.Println("Scanning SPF: ", runSpfScan)
+
+		// Spin out a number of ingest workers based on user input
+		wg.Add(*ingestWorkerNumber)
+		for w := 1; w <= *ingestWorkerNumber; w++ {
+			go ingestWorker(w, ingestQueue, resultsQueue, &wg, runSpfScan, runDmarcScan)
+		}
+
+		if *inFileName != "" {
+			go ingestDomains(*inFileName, ingestQueue)
+		} else if *targetName != "" {
+			ingestQueue <- *targetName
+			close(ingestQueue)
+		} else {
+			os.Exit(1)
+		}
+
+		go closeResultsQueue(&wg, resultsQueue, *ingestWorkerNumber)
+
+		resultsWorker(resultsQueue, *dbName)
 	}
-	if *dmarcScan == true || *scanAll == true {
-		runDmarcScan = true
+
+	if *genReport {
+		createReport(*dbName)
 	}
-
-	fmt.Println("Scanning DMARC: ", runDmarcScan)
-	fmt.Println("Scanning SPF: ", runSpfScan)
-
-	// Spin out a number of ingest workers based on user input
-	wg.Add(*ingestWorkerNumber)
-	for w := 1; w <= *ingestWorkerNumber; w++ {
-		go ingestWorker(w, ingestQueue, resultsQueue, &wg, runSpfScan, runDmarcScan)
-	}
-
-	if *inFileName != "" {
-		go ingestDomains(*inFileName, ingestQueue)
-	} else if *targetName != "" {
-		ingestQueue <- *targetName
-		close(ingestQueue)
-	} else {
-		fmt.Println("[-] ERROR: You need to provide some target")
-		os.Exit(1)
-	}
-
-	go closeResultsQueue(&wg, resultsQueue, *ingestWorkerNumber)
-
-	resultsWorker(resultsQueue, *dbName)
 
 }
