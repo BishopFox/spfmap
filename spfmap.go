@@ -28,8 +28,8 @@ func createReport(dbName string) {
 	q_numDmarcRecords := "SELECT count(domain_name) FROM results WHERE dmarc_string NOT LIKE \"\""
 	q_numSpfAll := "SELECT count(domain_name) FROM results WHERE (spf_all LIKE \"%all\")"
 	q_numSpfMinusAll := "SELECT count(domain_name) FROM results WHERE (spf_all LIKE \"-all\")"
-	q_numDmarcRejectQuarantine := "SELECT count(domain_name) FROM results WHERE (dmarc_p LIKE \"p=reject;\" OR dmarc_p LIKE \"p=quarantine;\")"
-	q_numNotSpoofable := "SELECT count(domain_name) FROM results WHERE spf_all NOT LIKE \"\" AND (dmarc_p LIKE \"p=reject;\" OR dmarc_p LIKE \"p=quarantine;\")"
+	q_numDmarcRejectQuarantine := "SELECT count(domain_name) FROM results WHERE (dmarc_p LIKE \"p=reject\" OR dmarc_p LIKE \"p=quarantine\")"
+	q_numNotSpoofable := "SELECT count(domain_name) FROM results WHERE spf_all NOT LIKE \"\" AND (dmarc_p LIKE \"p=reject\" OR dmarc_p LIKE \"p=quarantine\")"
 
 	s1, _ := c.Query(q_numRecords)
 	var numRecords int64
@@ -174,8 +174,16 @@ func resultsWorker(resultsQueue <-chan ScanResult, dbName string) {
 		all_r, _ := regexp.Compile(".all")
 		all_s := all_r.FindString(result.spf_string)
 
-		p_r, _ := regexp.Compile("p=.*?;")
-		p_s := p_r.FindString(result.dmarc_string)
+		p_r, _ := regexp.Compile("(p=.*?)($|;|\\s|\\z|\"|')")
+		p_inter := p_r.FindAllStringSubmatch(result.dmarc_string, -1)
+
+		p_s := ""
+		if len(p_inter) > 0 {
+
+			if len(p_inter[0]) > 1 {
+				p_s = p_inter[0][1]
+			} 
+		}
 
 		args := sqlite3.NamedArgs{"$domain": result.domain_name, 
 								  "$spf_string": result.spf_string,
@@ -196,7 +204,7 @@ func main() {
 	/* Set up command line arguments */
 	spfScan := flag.Bool("spf", false, "Scan targets for SPF")
 	dmarcScan := flag.Bool("dmarc", false, "Scan targets for DMARC")
-	scanAll := flag.Bool("all", true, "Scan targets for both SPF and DMARC")
+	scanAll := flag.Bool("all", false, "Scan targets for both SPF and DMARC")
 
 	genReport := flag.Bool("report", true, "Generate a report for the database")
 
